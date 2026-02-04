@@ -1,3 +1,4 @@
+from datetime import date
 import json
 import tarfile
 import zstandard as zstd
@@ -22,6 +23,78 @@ from contextlib import contextmanager
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def get_nested_value(obj, path):
+    """Get value from nested object using dot notation path."""
+    try:
+        keys = path.split('.')
+        current = obj
+        for key in keys:
+            if isinstance(current, dict) and key in current:
+                current = current[key]
+            else:
+                return None
+        return current
+    except (KeyError, TypeError):
+        return None
+
+
+def set_nested_value(obj, path, value):
+    """Set value in nested object using dot notation path."""
+    keys = path.split('.')
+    current = obj
+
+    # Navigate/create structure up to the last key
+    for key in keys[:-1]:
+        if key not in current:
+            current[key] = {}
+        current = current[key]
+
+    # Set the final value
+    current[keys[-1]] = value
+
+def extract_features(json_data, feature_list):
+    """
+    Extract features from JSON data using dot notation while maintaining original structure.
+
+    Args:
+        json_data (dict): The source JSON data
+        feature_list (list): List of dot notation paths to extract
+
+    Returns:
+        dict: New object with extracted features maintaining nested structure
+    """
+    result = {}
+
+    # Extract each feature
+    for feature in feature_list:
+        value = get_nested_value(json_data, feature)
+        if value is not None:
+            set_nested_value(result, feature, value)
+
+    return result
+
+
+def extract_features_with_defaults(json_data, feature_list, default_value=None):
+    """
+    Extract features with default values for missing keys.
+
+    Args:
+        json_data (dict): The source JSON data
+        feature_list (list): List of dot notation paths to extract
+        default_value: Value to use for missing features
+
+    Returns:
+        dict: New object with extracted features maintaining nested structure
+    """
+    result = {}
+
+    # Extract each feature, using default for missing values
+    for feature in feature_list:
+        value = get_nested_value(json_data, feature)
+        set_nested_value(result, feature, value if value is not None else default_value)
+
+    return result
 
 class AcousticBrainzProcessor:
     """Process AcousticBrainz dump files and extract features for similarity analysis"""
@@ -79,9 +152,14 @@ class AcousticBrainzProcessor:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tracks (
                     mbid UUID PRIMARY KEY,
+                    title TEXT,
+                    album_name TEXT,
+                    disc_number TEXT,
+                    track_number TEXT,
+                    date TEXT,
+                    country TEXT,
+                    label TEXT,
                     artist_mbid UUID,
-                    release_mbid UUID,
-                    recording_mbid UUID,
                     track_hash VARCHAR(32) UNIQUE NOT NULL,
                     length REAL,
                     processed BOOLEAN DEFAULT FALSE,
@@ -91,11 +169,17 @@ class AcousticBrainzProcessor:
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS features (
-                    mbid UUID PRIMARY KEY REFERENCES tracks(mbid) ON DELETE CASCADE,
-                    timbre_features REAL[],
-                    tonality_features REAL[],
-                    tempo_features REAL[],
+                    mbid UUID PRIMARY KEY,
+                    features JSONB,
                     metadata JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS artists (
+                    mbid UUID PRIMARY KEY,
+                    name TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             ''')
@@ -112,15 +196,13 @@ class AcousticBrainzProcessor:
                 SELECT
                     t.mbid,
                     t.artist_mbid,
-                    t.release_mbid,
-                    t.recording_mbid,
+                    a.name,
                     t.length,
-                    f.timbre_features,
-                    f.tonality_features,
-                    f.tempo_features,
+                    f.features,
                     f.metadata
                 FROM tracks t
                 JOIN features f ON t.mbid = f.mbid
+                JOIN artists a on a.mbid = t.artist_mbid
                 WHERE t.artist_mbid IS NOT NULL;
             ''')
 
@@ -203,144 +285,64 @@ class AcousticBrainzProcessor:
     def extract_features_from_json(self, json_data: Dict) -> Optional[Dict]:
         """Extract relevant features from AcousticBrainz JSON"""
         try:
+            feature_paths = [
+                "audio_properties.length",
+                "audio_properties.md5_encoded",
+                "tonal.thpcp",
+                "tonal.key_key",
+                "tonal.key_scale",
+                "tonal.key_strength",
+                "tonal.chords_strength.mean",
+                "tonal.chords_histogram",
+                "tonal.chords_changes_rate",
+                "rhythm.bpm",
+                "rhythm.onset_rate",
+                "rhythm.beats_count",
+                "rhythm.danceability",
+                "rhythm.beats_loudness.mean",
+                "rhythm.beats_loudness.var",
+                "rhythm.beats_position",
+                "rhythm.beats_loudness_band_ratio.mean",
+                "lowlevel.mfcc.cov",
+                "lowlevel.mfcc.mean",
+                "lowlevel.melbands.mean",
+                "lowlevel.melbands.var",
+                "lowlevel.dissonance.mean",
+                "lowlevel.dissonance.var",
+                "lowlevel.spectral_energy.mean",
+                "lowlevel.spectral_energy.var",
+                "lowlevel.spectral_spread.mean",
+                "lowlevel.spectral_spread.var",
+                "lowlevel.average_loudness",
+                "lowlevel.spectral_rolloff.mean",
+                "lowlevel.zerocrossingrate.mean",
+                "lowlevel.spectral_centroid.mean",
+                "lowlevel.dynamic_complexity",
+                "lowlevel.spectral_contrast_coeffs.mean",
+                "lowlevel.spectral_contrast_coeffs.var",
+                "lowlevel.spectral_contrast_valleys.mean",
+                "lowlevel.spectral_contrast_valleys.var",
+            ]
             features = {}
-
-            # Basic metadata - safely extract UUIDs
-            mbid = self.safe_uuid(json_data.get('mbid', ''))
-            if not mbid:
-                return None  # Skip records without valid MBID
 
             metadata_tags = json_data.get('metadata', {}).get('tags', {})
 
-            metadata = {
+            mbid = metadata_tags.get("musicbrainz_recordingid")[0] if metadata_tags.get("musicbrainz_recordingid") else None
+            if not mbid:
+                return
+
+            track_hash = self.compute_track_hash(json_data)
+
+            features = extract_features(json_data, feature_paths)
+
+            doc = {
                 'mbid': mbid,
-                'length': float(json_data.get('length', 0)),
-                'artist_mbid': self.safe_uuid(metadata_tags.get('musicbrainz_artistid', [''])[0] if metadata_tags.get('musicbrainz_artistid') else ''),
-                'release_mbid': self.safe_uuid(metadata_tags.get('musicbrainz_albumid', [''])[0] if metadata_tags.get('musicbrainz_albumid') else ''),
-                'recording_mbid': self.safe_uuid(metadata_tags.get('musicbrainz_trackid', [''])[0] if metadata_tags.get('musicbrainz_trackid') else ''),
-                'artist_name': metadata_tags.get('artist', [''])[0] if metadata_tags.get('artist') else '',
-                'title': metadata_tags.get('title', [''])[0] if metadata_tags.get('title') else '',
-                'album': metadata_tags.get('album', [''])[0] if metadata_tags.get('album') else ''
+                'metadata': metadata_tags,
+                'track_hash': track_hash,
+                'features': features
             }
 
-            lowlevel = json_data.get('lowlevel', {})
-            tonal = json_data.get('tonal', {})
-            rhythm = json_data.get('rhythm', {})
-
-            # TIMBRE FEATURES (MFCC + Spectral)
-            timbre_features = []
-
-            # MFCC coefficients (mean and var)
-            if 'mfcc' in lowlevel:
-                if 'mean' in lowlevel['mfcc']:
-                    timbre_features.extend(lowlevel['mfcc']['mean'])
-                if 'var' in lowlevel['mfcc']:
-                    timbre_features.extend(lowlevel['mfcc']['var'])
-
-            # Spectral features
-            spectral_features = [
-                'spectral_centroid', 'spectral_bandwidth', 'spectral_contrast',
-                'spectral_rolloff', 'spectral_decrease', 'spectral_energy',
-                'spectral_energyband_low', 'spectral_energyband_middle_low',
-                'spectral_energyband_middle_high', 'spectral_energyband_high',
-                'spectral_flatness_db', 'spectral_flux', 'spectral_kurtosis',
-                'spectral_skewness', 'spectral_spread', 'spectral_strongpeak'
-            ]
-
-            for feature in spectral_features:
-                if feature in lowlevel:
-                    if 'mean' in lowlevel[feature]:
-                        if isinstance(lowlevel[feature]['mean'], list):
-                            timbre_features.extend(lowlevel[feature]['mean'])
-                        else:
-                            timbre_features.append(lowlevel[feature]['mean'])
-                    if 'var' in lowlevel[feature]:
-                        if isinstance(lowlevel[feature]['var'], list):
-                            timbre_features.extend(lowlevel[feature]['var'])
-                        else:
-                            timbre_features.append(lowlevel[feature]['var'])
-
-            # Zero crossing rate
-            if 'zerocrossingrate' in lowlevel:
-                if 'mean' in lowlevel['zerocrossingrate']:
-                    timbre_features.append(lowlevel['zerocrossingrate']['mean'])
-                if 'var' in lowlevel['zerocrossingrate']:
-                    timbre_features.append(lowlevel['zerocrossingrate']['var'])
-
-            # TONALITY FEATURES
-            tonality_features = []
-
-            # Chroma features (chord histograms)
-            if 'chords_histogram' in tonal:
-                tonality_features.extend(tonal['chords_histogram'])
-
-            if 'hpcp' in tonal:
-                if 'mean' in tonal['hpcp']:
-                    tonality_features.extend(tonal['hpcp']['mean'])
-                if 'var' in tonal['hpcp']:
-                    tonality_features.extend(tonal['hpcp']['var'])
-
-            # Key and scale features
-            if 'key_key' in tonal:
-                tonality_features.append(float(tonal['key_key']))
-            if 'key_scale' in tonal:
-                tonality_features.append(float(tonal['key_scale']))
-            if 'key_strength' in tonal:
-                tonality_features.append(float(tonal['key_strength']))
-
-            # Tuning frequency
-            if 'tuning_frequency' in tonal:
-                tonality_features.append(float(tonal['tuning_frequency']))
-
-            # TEMPO/RHYTHM FEATURES
-            tempo_features = []
-
-            # BPM and tempo
-            if 'bpm' in rhythm:
-                tempo_features.append(float(rhythm['bpm']))
-            if 'bpm_histogram_first_peak_bpm' in rhythm:
-                tempo_features.append(float(rhythm['bpm_histogram_first_peak_bpm']))
-            if 'bpm_histogram_second_peak_bpm' in rhythm:
-                tempo_features.append(float(rhythm['bpm_histogram_second_peak_bpm']))
-
-            # Onset rate
-            if 'onset_rate' in rhythm:
-                tempo_features.append(float(rhythm['onset_rate']))
-
-            # Beats loudness statistics
-            if 'beats_loudness' in rhythm:
-                if 'mean' in rhythm['beats_loudness']:
-                    tempo_features.append(float(rhythm['beats_loudness']['mean']))
-                if 'var' in rhythm['beats_loudness']:
-                    tempo_features.append(float(rhythm['beats_loudness']['var']))
-
-            # Danceability
-            if 'danceability' in rhythm:
-                tempo_features.append(float(rhythm['danceability']))
-
-            # Ensure we have features
-            if not timbre_features and not tonality_features and not tempo_features:
-                return None
-
-            # Convert to numpy arrays with proper handling of NaN/inf
-            timbre_array = np.array(timbre_features, dtype=np.float32)
-            tonality_array = np.array(tonality_features, dtype=np.float32)
-            tempo_array = np.array(tempo_features, dtype=np.float32)
-
-            # Replace NaN/inf with 0
-            timbre_array = np.nan_to_num(timbre_array, nan=0.0, posinf=0.0, neginf=0.0)
-            tonality_array = np.nan_to_num(tonality_array, nan=0.0, posinf=0.0, neginf=0.0)
-            tempo_array = np.nan_to_num(tempo_array, nan=0.0, posinf=0.0, neginf=0.0)
-
-            features = {
-                'metadata': metadata,
-                'timbre': timbre_array.tolist(),
-                'tonality': tonality_array.tolist(),
-                'tempo': tempo_array.tolist(),
-                'track_hash': self.compute_track_hash(json_data)
-            }
-
-            return features
+            return doc
 
         except Exception as e:
             logger.error(f"Error extracting features: {e}")
@@ -357,28 +359,38 @@ class AcousticBrainzProcessor:
             # Prepare data for batch insert
             track_data = []
             feature_data = []
+            artist_data = []
 
             for track in tracks_batch:
                 metadata = track['metadata']
+                features = track['features']
 
                 # Track data
                 track_data.append((
-                    metadata['mbid'],
-                    metadata['artist_mbid'],
-                    metadata['release_mbid'],
-                    metadata['recording_mbid'],
+                    track['mbid'],
+                    metadata['title'][0],
+                    metadata['album'][0],
+                    metadata['discnumber'][0] if 'discnumber' in metadata else None,
+                    metadata['tracknumber'][0] if 'tracknumber' in metadata else None,
+                    metadata['date'][0] if 'date' in metadata else None,
+                    metadata['country'][0] if 'country' in metadata else None,
+                    metadata['label'][0] if 'label' in metadata else None,
+                    metadata['musicbrainz_artistid'][0],
                     track['track_hash'],
-                    metadata['length'],
+                    features['audio_properties']['length'],
                     True  # processed
                 ))
 
                 # Feature data
                 feature_data.append((
                     metadata['mbid'],
-                    track['timbre'],
-                    track['tonality'],
-                    track['tempo'],
-                    Json(metadata)  # Store full metadata as JSONB
+                    Json(features),
+                    Json(metadata)
+                ))
+
+                artist_data.append((
+                    metadata["musicbrainz_artistid"][0],
+                    metadata["artist"][0]
                 ))
 
             try:
@@ -386,8 +398,8 @@ class AcousticBrainzProcessor:
                 execute_batch(
                     cursor,
                     '''INSERT INTO tracks
-                       (mbid, artist_mbid, release_mbid, recording_mbid, track_hash, length, processed)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       (mbid, title, album, discnumber, tracknumber, date, country, label, artist_mbid, track_hash, length, processed)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (track_hash) DO NOTHING''',
                     track_data,
                     page_size=100
@@ -397,8 +409,18 @@ class AcousticBrainzProcessor:
                 execute_batch(
                     cursor,
                     '''INSERT INTO features
-                       (mbid, timbre_features, tonality_features, tempo_features, metadata)
-                       VALUES (%s, %s, %s, %s, %s)
+                       (mbid, features, metadata)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (mbid) DO NOTHING''',
+                    feature_data,
+                    page_size=100
+                )
+
+                execute_batch(
+                    cursor,
+                    '''INSERT INTO artists
+                       (mbid, name)
+                       VALUES (%s, %s)
                        ON CONFLICT (mbid) DO NOTHING''',
                     feature_data,
                     page_size=100
@@ -479,13 +501,10 @@ class AcousticBrainzProcessor:
 
         return processed_count
 
-    def process_directory(self, directory_path: str, max_files: int = None) -> int:
+    def process_directory(self, directory_path: str) -> int:
         """Process all JSON files in a directory"""
         directory = Path(directory_path)
         json_files = list(directory.rglob("*.json"))
-
-        if max_files:
-            json_files = json_files[:max_files]
 
         logger.info(f"Found {len(json_files)} JSON files to process")
 
@@ -589,7 +608,10 @@ class AcousticBrainzProcessor:
 
         return str(output_file)
 
-    def process_acousticbrainz_dump(self, zst_file_path: str, max_files: int = None) -> str:
+    def should_process_dir(self, dirpath, filenames):
+        return any(f.endswith('.json') for f in filenames)
+
+    def process_acousticbrainz_dump(self, zst_file_path: str) -> str:
         """Complete pipeline to process AcousticBrainz dump file"""
         logger.info(f"Processing AcousticBrainz dump: {zst_file_path}")
 
@@ -600,11 +622,11 @@ class AcousticBrainzProcessor:
         extracted_dir = self.extract_tar_file(tar_file_path)
 
         # Step 3: Process JSON files
-        processed_count = self.process_directory(extracted_dir, max_files)
+        processed_count = 0
+        for dirpath, dirnames, filenames in os.walk(extracted_dir):
+            if self.should_process_dir(dirpath, filenames):
+                processed_count += self.process_directory(extracted_dir)
         logger.info(f"Processed {processed_count} unique tracks")
-
-        # Step 4: Export to CSV
-        csv_file = self.export_features_to_csv()
 
         # Cleanup extracted files to save space
         try:
@@ -614,8 +636,6 @@ class AcousticBrainzProcessor:
             logger.info("Cleaned up temporary files")
         except Exception as e:
             logger.warning(f"Could not clean up temporary files: {e}")
-
-        return csv_file
 
     def get_statistics(self) -> Dict:
         """Get processing statistics"""
@@ -687,7 +707,6 @@ if __name__ == "__main__":
     parser.add_argument("--password", help="PostgreSQL password (or set PGPASSWORD env var)")
     parser.add_argument("--port", type=int, default=5432, help="PostgreSQL port")
     parser.add_argument("--output-dir", default="processed_data", help="Output directory")
-    parser.add_argument("--max-files", type=int, help="Maximum number of JSON files to process (for testing)")
     parser.add_argument("--min-tracks", type=int, default=2, help="Minimum tracks per artist to include")
     parser.add_argument("--chunk-size", type=int, default=1000, help="Batch size for database operations")
 
@@ -716,9 +735,8 @@ if __name__ == "__main__":
     )
 
     try:
-        csv_file = processor.process_acousticbrainz_dump(
-            args.zst_file,
-            max_files=args.max_files
+        processor.process_acousticbrainz_dump(
+            args.zst_file
         )
 
         # Print statistics
@@ -734,9 +752,6 @@ if __name__ == "__main__":
             print("\nTop 10 artists by track count:")
             for artist_mbid, artist_name, track_count in stats['top_artists'][:10]:
                 print(f"  {artist_name or 'Unknown'}: {track_count} tracks")
-
-        print(f"\nFeatures dataset saved to: {csv_file}")
-        print("Ready for similarity analysis!")
 
     except Exception as e:
         logger.error(f"Processing failed: {e}")

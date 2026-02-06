@@ -156,6 +156,28 @@ class DatabaseOperations:
                 """, (archive_name, files_processed, status))
             conn.commit()
 
+    def batch_update_features(self, updates: list[dict], columns: list[str]):
+        """Update specific feature columns for existing tracks.
+
+        Args:
+            updates: List of dicts with 'mbid' and feature values
+            columns: Column names to update (excluding mbid)
+        """
+        if not updates or not columns:
+            return
+
+        with self.connection() as conn:
+            with conn.cursor() as cur:
+                set_clause = ", ".join(f"{col} = %s" for col in columns)
+                sql = f"UPDATE track_features SET {set_clause} WHERE mbid = %s"
+
+                for update in updates:
+                    values = [update.get(col) for col in columns]
+                    values.append(update["mbid"])
+                    cur.execute(sql, values)
+
+            conn.commit()
+
     def record_extractor_run(self, extractor_name: str, version: int, archive_name: str):
         """Record that an extractor has been run on an archive."""
         with self.connection() as conn:

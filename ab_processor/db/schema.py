@@ -55,8 +55,9 @@ class SchemaManager:
                     )
                 """)
 
-                # Add columns from all extractors
+                # Add columns from all extractors and drop orphans
                 self._add_extractor_columns(cur)
+                self._drop_orphan_columns(cur)
 
                 # Processing state table
                 cur.execute("""
@@ -108,6 +109,29 @@ class SchemaManager:
                         sql.SQL(col.col_type.value)
                     ))
                     print(f"  Added column: track_features.{col.name}")
+
+    def _drop_orphan_columns(self, cursor):
+        """Drop columns in track_features that no extractor defines."""
+        # Get all columns currently in the table (except mbid)
+        cursor.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'track_features' AND column_name != 'mbid'
+        """)
+        db_columns = {row[0] for row in cursor.fetchall()}
+
+        # Get all columns defined by extractors
+        extractor_columns = set()
+        for extractor_cls in get_all_extractors().values():
+            extractor = extractor_cls()
+            for col in extractor.columns:
+                extractor_columns.add(col.name)
+
+        # Drop orphans
+        for orphan in db_columns - extractor_columns:
+            cursor.execute(sql.SQL(
+                "ALTER TABLE track_features DROP COLUMN {}"
+            ).format(sql.Identifier(orphan)))
+            print(f"  Dropped orphan column: track_features.{orphan}")
 
     def _create_indices(self, cursor):
         """Create performance indices."""

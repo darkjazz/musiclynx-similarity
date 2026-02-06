@@ -69,7 +69,7 @@ class BeatsExtractor(FeatureExtractor):
     """Extract beat-related features."""
 
     name = "beats"
-    version = 1
+    version = 2
 
     @property
     def columns(self) -> list[ColumnDefinition]:
@@ -78,6 +78,7 @@ class BeatsExtractor(FeatureExtractor):
             ColumnDefinition("beats_loudness_mean", ColumnType.REAL, description="Mean loudness at beats"),
             ColumnDefinition("beats_loudness_std", ColumnType.REAL, description="Std dev of loudness at beats"),
             ColumnDefinition("onset_rate", ColumnType.REAL, description="Rate of note onsets per second"),
+            ColumnDefinition("beats_position", ColumnType.REAL_ARRAY, description="Beat timestamps in seconds"),
         ]
 
     @property
@@ -86,12 +87,14 @@ class BeatsExtractor(FeatureExtractor):
             "rhythm.beats_count",
             "rhythm.beats_loudness",
             "rhythm.onset_rate",
+            "rhythm.beats_position",
         ]
 
     def extract(self, json_data: dict) -> ExtractionResult:
         beats_count = self.get_nested(json_data, "rhythm.beats_count")
         beats_loudness = self.get_nested(json_data, "rhythm.beats_loudness")
         onset_rate = self.get_nested(json_data, "rhythm.onset_rate")
+        beats_position = self.get_nested(json_data, "rhythm.beats_position")
 
         # Extract mean/std from beats_loudness if available
         # Note: AcousticBrainz uses "var" (variance) not "stdev"
@@ -110,4 +113,5 @@ class BeatsExtractor(FeatureExtractor):
             "beats_loudness_mean": float(loudness_mean) if loudness_mean is not None else None,
             "beats_loudness_std": float(loudness_std) if loudness_std is not None else None,
             "onset_rate": float(onset_rate) if onset_rate is not None else None,
+            "beats_position": beats_position if isinstance(beats_position, list) else None,
         })

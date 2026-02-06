@@ -45,17 +45,24 @@ def cmd_process(args, config: Config):
 
 
 def cmd_rerun(args, config: Config):
-    """Rerun a specific extractor."""
-    extractor_name = args.extractor
+    """Rerun one or more extractors."""
+    extractor_names = args.extractors
 
-    try:
-        extractor_cls = get_extractor(extractor_name)
-    except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    extractors = []
+    for name in extractor_names:
+        try:
+            extractor_cls = get_extractor(name)
+            extractors.append(extractor_cls())
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
-    extractor = extractor_cls()
-    print(f"Rerunning extractor: {extractor_name} (v{extractor.version})")
+    names_str = ", ".join(f"{e.name} (v{e.version})" for e in extractors)
+    print(f"Rerunning extractors: {names_str}")
+
+    # Add any new columns before rerunning
+    schema = SchemaManager(config)
+    schema.init_schema()
 
     db_ops = DatabaseOperations(config)
     processor = BatchProcessor(config, db_ops)
@@ -68,12 +75,10 @@ def cmd_rerun(args, config: Config):
 
     for idx in archive_indices:
         try:
-            processor.process_archive(
-                idx,
-                extractors=[extractor],
-                rerun=True,
-            )
-            db_ops.record_extractor_run(extractor_name, extractor.version, config.get_archive_path(idx).name)
+            processor.rerun_extractors(idx, extractors)
+            archive_name = config.get_archive_path(idx).name
+            for ext in extractors:
+                db_ops.record_extractor_run(ext.name, ext.version, archive_name)
         except FileNotFoundError as e:
             print(f"Warning: {e}")
             continue
@@ -141,10 +146,11 @@ def main():
     )
 
     # rerun command
-    rerun_parser = subparsers.add_parser("rerun", help="Rerun a specific extractor")
+    rerun_parser = subparsers.add_parser("rerun", help="Rerun one or more extractors")
     rerun_parser.add_argument(
-        "extractor",
-        help="Name of extractor to rerun",
+        "extractors",
+        nargs="+",
+        help="Names of extractors to rerun (single pass per archive)",
     )
     rerun_parser.add_argument(
         "--archives", "-a",

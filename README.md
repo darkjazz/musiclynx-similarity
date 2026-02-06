@@ -12,6 +12,7 @@ Processes AcousticBrainz data dumps into PostgreSQL for music similarity experim
 - PostgreSQL
 - `psycopg2-binary`
 - `zstandard`
+- `scikit-learn`, `hdbscan`, `pandas`, `numpy` (for experiments)
 
 ## Data Source
 
@@ -65,6 +66,39 @@ python main.py list-extractors
 - `tracks` (mbid, title, album_name, artist_mbid, track_hash, length_seconds, source_archive)
 - `track_features` (mbid + all extractor columns)
 - `processing_state` (archive progress for resumability)
+
+## Experiments
+
+### Clustering-based Artist Similarity
+
+`experiments/clustering.py` computes artist similarity via HDBSCAN clustering. Tracks are clustered by audio features, then artist similarity is derived from shared cluster membership (bipartite graph projection with cosine similarity).
+
+**Feature sets:**
+
+| Name | Dimensions | Description |
+|------|-----------|-------------|
+| spectral | 40 | MFCC, spectral contrast, complexity |
+| tonal | 60 | Chords histogram, tonal profile |
+| rhythm | 5 | BPM, onset rate, beats loudness |
+| combined | 105 | All of the above |
+
+**Usage:**
+
+```bash
+# Run all feature sets
+python experiments/clustering.py
+
+# Run a specific feature set
+python experiments/clustering.py -f spectral
+
+# Custom HDBSCAN parameters
+python experiments/clustering.py -f combined --min-cluster-size 30 --min-samples 15
+
+# Custom output directory
+python experiments/clustering.py -o my_results/
+```
+
+Results are saved as pickle files in the output directory (default: `results/`).
 
 ## Adding New Extractors
 

@@ -27,13 +27,13 @@ class MFCCExtractor(FeatureExtractor):
     """Extract MFCC (Mel-Frequency Cepstral Coefficients) statistics."""
 
     name = "mfcc"
-    version = 1
+    version = 2
 
     @property
     def columns(self) -> list[ColumnDefinition]:
         return [
             ColumnDefinition("mfcc_mean", ColumnType.REAL_ARRAY, description="Mean MFCC coefficients (13-dim)"),
-            ColumnDefinition("mfcc_cov", ColumnType.REAL_ARRAY, description="MFCC covariance matrix (flattened)"),
+            ColumnDefinition("mfcc_std", ColumnType.REAL_ARRAY, description="MFCC std devs from covariance diagonal (13-dim)"),
         ]
 
     @property
@@ -51,14 +51,14 @@ class MFCCExtractor(FeatureExtractor):
         if mfcc_mean is None:
             return ExtractionResult.fail("Missing MFCC mean")
 
-        # Flatten covariance matrix if present
-        cov_flat = None
+        # Extract std devs: sqrt of covariance matrix diagonal
+        mfcc_std = None
         if mfcc_cov is not None and isinstance(mfcc_cov, list):
-            cov_flat = [val for row in mfcc_cov for val in row]
+            mfcc_std = [math.sqrt(mfcc_cov[i][i]) for i in range(len(mfcc_cov))]
 
         return ExtractionResult.ok({
             "mfcc_mean": mfcc_mean,
-            "mfcc_cov": cov_flat,
+            "mfcc_std": mfcc_std,
         })
 
 
@@ -101,7 +101,7 @@ class SpectralExtractor(FeatureExtractor):
     """Extract spectral features."""
 
     name = "spectral"
-    version = 1
+    version = 2
 
     @property
     def columns(self) -> list[ColumnDefinition]:
@@ -111,7 +111,10 @@ class SpectralExtractor(FeatureExtractor):
             ColumnDefinition("spectral_flux_mean", ColumnType.REAL, description="Mean spectral flux"),
             ColumnDefinition("spectral_rolloff_mean", ColumnType.REAL, description="Mean spectral rolloff"),
             ColumnDefinition("spectral_complexity_mean", ColumnType.REAL, description="Mean spectral complexity"),
-            ColumnDefinition("spectral_contrast_mean", ColumnType.REAL_ARRAY, description="Mean spectral contrast coefficients"),
+            ColumnDefinition("spectral_contrast_coeffs_mean", ColumnType.REAL_ARRAY, description="Mean spectral contrast coefficients (6-dim)"),
+            ColumnDefinition("spectral_contrast_coeffs_std", ColumnType.REAL_ARRAY, description="Std dev of spectral contrast coefficients (6-dim)"),
+            ColumnDefinition("spectral_contrast_valleys_mean", ColumnType.REAL_ARRAY, description="Mean spectral contrast valleys (6-dim)"),
+            ColumnDefinition("spectral_contrast_valleys_std", ColumnType.REAL_ARRAY, description="Std dev of spectral contrast valleys (6-dim)"),
         ]
 
     @property
@@ -122,6 +125,7 @@ class SpectralExtractor(FeatureExtractor):
             "lowlevel.spectral_rolloff",
             "lowlevel.spectral_complexity",
             "lowlevel.spectral_contrast_coeffs",
+            "lowlevel.spectral_contrast_valleys",
         ]
 
     def extract(self, json_data: dict) -> ExtractionResult:
@@ -129,7 +133,8 @@ class SpectralExtractor(FeatureExtractor):
         flux = self.get_nested(json_data, "lowlevel.spectral_flux")
         rolloff = self.get_nested(json_data, "lowlevel.spectral_rolloff")
         complexity = self.get_nested(json_data, "lowlevel.spectral_complexity")
-        contrast = self.get_nested(json_data, "lowlevel.spectral_contrast_coeffs")
+        contrast_coeffs = self.get_nested(json_data, "lowlevel.spectral_contrast_coeffs")
+        contrast_valleys = self.get_nested(json_data, "lowlevel.spectral_contrast_valleys")
 
         return ExtractionResult.ok({
             "spectral_centroid_mean": get_mean(centroid),
@@ -137,7 +142,10 @@ class SpectralExtractor(FeatureExtractor):
             "spectral_flux_mean": get_mean(flux),
             "spectral_rolloff_mean": get_mean(rolloff),
             "spectral_complexity_mean": get_mean(complexity),
-            "spectral_contrast_mean": contrast.get("mean") if isinstance(contrast, dict) else None,
+            "spectral_contrast_coeffs_mean": contrast_coeffs.get("mean") if isinstance(contrast_coeffs, dict) else None,
+            "spectral_contrast_coeffs_std": [math.sqrt(v) for v in contrast_coeffs["var"]] if isinstance(contrast_coeffs, dict) and contrast_coeffs.get("var") else None,
+            "spectral_contrast_valleys_mean": contrast_valleys.get("mean") if isinstance(contrast_valleys, dict) else None,
+            "spectral_contrast_valleys_std": [math.sqrt(v) for v in contrast_valleys["var"]] if isinstance(contrast_valleys, dict) and contrast_valleys.get("var") else None,
         })
 
 

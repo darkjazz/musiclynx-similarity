@@ -138,6 +138,67 @@ class BatchProcessor:
         self._print_final_stats(stats)
         return stats
 
+    def rerun_extractors(
+        self,
+        archive_index: int,
+        extractors: list[FeatureExtractor],
+    ) -> ProcessingStats:
+        """Rerun multiple extractors in a single archive pass.
+
+        Reads the archive once, runs all extractors on each entry, and
+        UPDATEs existing rows in track_features matched by mbid.
+        """
+        archive_path = self.config.get_archive_path(archive_index)
+        archive_name = archive_path.name
+
+        if not archive_path.exists():
+            raise FileNotFoundError(f"Archive not found: {archive_path}")
+
+        stats = ProcessingStats(archive_name=archive_name)
+        reader = StreamingArchiveReader(archive_path)
+
+        # Collect all columns across all extractors
+        all_columns = []
+        for ext in extractors:
+            all_columns.extend(col.name for col in ext.columns)
+
+        batch = []
+        names = ", ".join(e.name for e in extractors)
+        print(f"Rerunning [{names}] on {archive_name}...")
+        sys.stdout.flush()
+
+        for entry in reader.iter_json_files():
+            update = {"mbid": entry.mbid}
+            any_success = False
+
+            for extractor in extractors:
+                result = extractor.extract(entry.data)
+                if result.success:
+                    update.update(result.values)
+                    any_success = True
+                else:
+                    if extractor.name not in stats.extraction_errors:
+                        stats.extraction_errors[extractor.name] = 0
+                    stats.extraction_errors[extractor.name] += 1
+
+            if not any_success:
+                stats.tracks_failed += 1
+                continue
+
+            batch.append(update)
+            stats.tracks_processed += 1
+
+            if len(batch) >= self.config.batch_size:
+                self.db_ops.batch_update_features(batch, all_columns)
+                batch = []
+                self._print_progress(stats)
+
+        if batch:
+            self.db_ops.batch_update_features(batch, all_columns)
+
+        self._print_final_stats(stats)
+        return stats
+
     def _extract_track_data(
         self,
         entry: ArchiveEntry,

@@ -69,7 +69,7 @@ class ChordsExtractor(FeatureExtractor):
     """Extract chord-related features."""
 
     name = "chords"
-    version = 1
+    version = 2
 
     @property
     def columns(self) -> list[ColumnDefinition]:
@@ -78,6 +78,7 @@ class ChordsExtractor(FeatureExtractor):
             ColumnDefinition("chords_number_rate", ColumnType.REAL, description="Number of chord types used"),
             ColumnDefinition("chords_key", ColumnType.TEXT, description="Key detected from chords"),
             ColumnDefinition("chords_scale", ColumnType.TEXT, description="Scale detected from chords"),
+            ColumnDefinition("chords_histogram", ColumnType.REAL_ARRAY, description="Chord type histogram (24-dim)"),
         ]
 
     @property
@@ -87,6 +88,7 @@ class ChordsExtractor(FeatureExtractor):
             "tonal.chords_number_rate",
             "tonal.chords_key",
             "tonal.chords_scale",
+            "tonal.chords_histogram",
         ]
 
     def extract(self, json_data: dict) -> ExtractionResult:
@@ -94,12 +96,14 @@ class ChordsExtractor(FeatureExtractor):
         number_rate = self.get_nested(json_data, "tonal.chords_number_rate")
         key = self.get_nested(json_data, "tonal.chords_key")
         scale = self.get_nested(json_data, "tonal.chords_scale")
+        histogram = self.get_nested(json_data, "tonal.chords_histogram")
 
         return ExtractionResult.ok({
             "chords_changes_rate": float(changes_rate) if changes_rate is not None else None,
             "chords_number_rate": float(number_rate) if number_rate is not None else None,
             "chords_key": key,
             "chords_scale": scale,
+            "chords_histogram": histogram if isinstance(histogram, list) else None,
         })
 
 
